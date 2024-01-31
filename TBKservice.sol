@@ -32,7 +32,7 @@ contract TBKservice{
 
 //-----------------------------------------------------------------------// v EVENTS
 
-    event Payout(address indexed to, string symbol, uint256 total, uint256 claimed, uint256 fee, uint256 burned);
+    event Payout(address indexed to, string symbol, uint256 total, uint256 claimed, uint256 fee);
     event Deposit(address indexed from, address indexed to, string symbol, uint32 amount, uint8 server, string character);
     event Withdrawal(address indexed from, address indexed to, string symbol, uint32 amount, uint8 server, string character, uint32 refund);
  
@@ -76,7 +76,7 @@ contract TBKservice{
 
 //-----------------------------------------------------------------------// v INTERNAL FUNCTIONS
 
-    function _claim(string calldata _symbol, uint32 _amount) private returns(uint256 totalAmount, uint256 claimAmount, uint256 feeAmount, uint256 burnAmount){
+    function _claim(string calldata _symbol, uint32 _amount) private returns(uint256 totalAmount, uint256 claimAmount, uint256 feeAmount){
 
         require(_amount > 0, "Amount is zero");
 
@@ -92,8 +92,7 @@ contract TBKservice{
 
         totalAmount = _amount * (10 ** erc20.decimals());
         feeAmount = totalAmount * feePerThousand / 1000;
-        burnAmount = feeAmount / 10;
-        claimAmount = totalAmount - feeAmount - burnAmount;
+        claimAmount = totalAmount - feeAmount;
 
         require(tbk.GetBalance(_symbol, msg.sender)>= _amount, "Insufficient balance");
 
@@ -102,9 +101,6 @@ contract TBKservice{
 
         if(feeAmount > 0)
             erc20.transfer(collectorAddress, feeAmount);
-
-        if(burnAmount > 0)
-            erc20.transfer(address(0), burnAmount);
     }
 
     function _topup(address _to, string calldata _symbol, uint32 _amount) private returns(uint32 topupAmount){
@@ -211,10 +207,10 @@ contract TBKservice{
 
         require(msg.value > 0, "Manager fee is zero");
 
-        (uint256 totalAmount, uint256 claimAmount, uint256 feeAmount, uint256 burnAmount) = _claim(_symbol, _amount);
+        (uint256 totalAmount, uint256 claimAmount, uint256 feeAmount) = _claim(_symbol, _amount);
         payable(address(managerAddress)).call{value : msg.value}("");
                 
-        emit Payout(msg.sender, _symbol, totalAmount, claimAmount, feeAmount, burnAmount);
+        emit Payout(msg.sender, _symbol, totalAmount, claimAmount, feeAmount);
 
         return true;
     }
