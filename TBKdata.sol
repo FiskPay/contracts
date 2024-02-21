@@ -1,6 +1,6 @@
 //SPDX-License-Identifier: MIT
 
-pragma solidity 0.8.22;
+pragma solidity 0.8.24;
 
 interface IProxy{
 
@@ -28,7 +28,7 @@ contract TBKdata{
 
 //-----------------------------------------------------------------------// v ADDRESSES
 
-    address constant private proxyAddress = 0xbceac0a87F1FB1db4C641E3B8De2b59B3397fD47;
+    address constant private proxyAddress = 0xFCE63f00cC7b6BC7DDE11D9A4B00EDD1FD2c2dc6;
 
 //-----------------------------------------------------------------------// v NUMBERS
 
