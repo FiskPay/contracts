@@ -50,8 +50,6 @@ contract TBKservice{
 
 //-----------------------------------------------------------------------// v NUMBERS
 
-    uint8 private feePerThousand = 0;
-
 //-----------------------------------------------------------------------// v BYTES
 
 //-----------------------------------------------------------------------// v STRINGS
@@ -63,6 +61,8 @@ contract TBKservice{
 //-----------------------------------------------------------------------// v ENUMS
 
 //-----------------------------------------------------------------------// v MAPPINGS
+
+    mapping(string => uint8) private feePerThousand;
 
 //-----------------------------------------------------------------------// v MODIFIERS
 
@@ -91,7 +91,7 @@ contract TBKservice{
         IERC20 erc20 = IERC20(erc20Address);
 
         totalAmount = _amount * (10 ** erc20.decimals());
-        feeAmount = totalAmount * feePerThousand / 1000;
+        feeAmount = totalAmount * feePerThousand[_symbol] / 1000;
         claimAmount = totalAmount - feeAmount;
 
         require(tbk.GetBalance(_symbol, msg.sender)>= _amount, "Insufficient balance");
@@ -148,7 +148,7 @@ contract TBKservice{
         IERC20 erc20 = IERC20(erc20Address);
 
         uint256 totalAmount = _amount * (10 ** erc20.decimals());
-        uint256 feeAmount = totalAmount * feePerThousand / 1000;
+        uint256 feeAmount = totalAmount * feePerThousand[_symbol] / 1000;
         
         tbk.WithdrawBalance(erc20Address, _from, _amount);
         erc20.transfer(_to, totalAmount - feeAmount);
@@ -186,9 +186,9 @@ contract TBKservice{
         return ITBK(proxy.GetContractAddress("TBKdata")).GetAddress(_symbol);
     }
 
-    function GetFee() public view returns(uint8){
+    function GetFee(string calldata _symbol) public view returns(uint8){
 
-        return feePerThousand;
+        return feePerThousand[_symbol];
     }
     
     function GetManager() public view returns(address){
@@ -252,9 +252,9 @@ contract TBKservice{
         return true;
     }
 
-    function SetFee(uint8 _perThousand) public ownerOnly returns(bool){
+    function SetFee(string calldata _symbol, uint8 _perThousand) public ownerOnly returns(bool){
 
-        feePerThousand = _perThousand;
+        feePerThousand[_symbol] = _perThousand;
 
         return true;
     }
