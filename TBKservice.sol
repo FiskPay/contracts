@@ -1,21 +1,21 @@
 //SPDX-License-Identifier: MIT
 
-pragma solidity 0.8.24;
+pragma solidity 0.8.28;
 
 interface IProxy{
 
     function Owner() external view returns(address);
-    function GetContractAddress(string calldata _name) external view returns(address);
+    function GetContractAddress(string calldata name) external view returns(address);
 }
 
 interface IERC20{
 
-    function decimals() external view returns (uint8);
-    function balanceOf(address owner) external view returns (uint256);
-    function allowance(address owner, address spender) external view returns (uint256);
-    function approve(address spender, uint256 amount) external returns (bool);
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function decimals() external view returns(uint8);
+    function balanceOf(address owner) external view returns(uint256);
+    function allowance(address owner, address spender) external view returns(uint256);
+    function approve(address spender, uint256 amount) external returns(bool);
+    function transfer(address to, uint256 amount) external returns(bool);
+    function transferFrom(address from, address to, uint256 amount) external returns(bool);
 }
 
 interface ITBK{
@@ -23,6 +23,8 @@ interface ITBK{
     function GetAddress(string calldata symbol) external view returns(address);
     function GetBalance(string calldata symbol, address client) external view returns(uint32);
     function GetKey(string calldata symbol, address client) external view returns(bytes32);
+    function GetTokenFee(string calldata symbol) external view returns(uint8);
+    function GetPolFee() external view returns (uint256);
     function DepositBalance(address token, address client, uint32 amount) external returns(bool);
     function WithdrawBalance(address token, address client, uint32 amount) external returns(bool);
     function SetKey(string calldata symbol, address client, bytes32 key) external returns(bool);
@@ -38,15 +40,15 @@ contract TBKservice{
  
 //-----------------------------------------------------------------------// v INTERFACES
 
-    IProxy constant private proxy = IProxy(proxyAddress);
+    IProxy immutable private proxy = IProxy(proxyAddress);
 
 //-----------------------------------------------------------------------// v BOOLEANS
 
 //-----------------------------------------------------------------------// v ADDRESSES
 
-    address constant private proxyAddress = 0xFCE63f00cC7b6BC7DDE11D9A4B00EDD1FD2c2dc6;
-    address private managerAddress = 0xC33aeBe8e1E0217D85fb6730a9C371EF95bBC245;
-    address private collectorAddress = proxy.Owner();
+    address immutable private proxyAddress;
+    address private managerAddress;
+    address private collectorAddress;
 
 //-----------------------------------------------------------------------// v NUMBERS
 
@@ -62,8 +64,6 @@ contract TBKservice{
 
 //-----------------------------------------------------------------------// v MAPPINGS
 
-    mapping(string => uint8) private feePerThousand;
-
 //-----------------------------------------------------------------------// v MODIFIERS
 
     modifier ownerOnly() {
@@ -73,6 +73,13 @@ contract TBKservice{
     }
 
 //-----------------------------------------------------------------------// v CONSTRUCTOR
+
+    constructor() {
+
+        proxyAddress = 0xFCE63f00cC7b6BC7DDE11D9A4B00EDD1FD2c2dc6;
+        managerAddress = 0xC33aeBe8e1E0217D85fb6730a9C371EF95bBC245;
+        collectorAddress = proxy.Owner();
+    }
 
 //-----------------------------------------------------------------------// v INTERNAL FUNCTIONS
 
@@ -86,12 +93,12 @@ contract TBKservice{
 
         address erc20Address = tbk.GetAddress(_symbol);
 
-        require(erc20Address != address(0), "Token unsupported");
+        require(erc20Address != address(0), "Unsupported token");
 
         IERC20 erc20 = IERC20(erc20Address);
 
         totalAmount = _amount * (10 ** erc20.decimals());
-        feeAmount = totalAmount * feePerThousand[_symbol] / 1000;
+        feeAmount = totalAmount * tbk.GetTokenFee(_symbol) / 1000;
         claimAmount = totalAmount - feeAmount;
 
         require(tbk.GetBalance(_symbol, msg.sender)>= _amount, "Insufficient balance");
@@ -113,7 +120,7 @@ contract TBKservice{
 
         address erc20Address = tbk.GetAddress(_symbol);
 
-        require(erc20Address != address(0), "Token unsupported");
+        require(erc20Address != address(0), "Unsupported token");
         require(tbk.GetKey(_symbol, _to) != bytes32(0), "Client key not set");
 
         IERC20 erc20 = IERC20(erc20Address);
@@ -142,13 +149,13 @@ contract TBKservice{
 
         address erc20Address = tbk.GetAddress(_symbol);
 
-        require(erc20Address != address(0), "Token unsupported");
-        require(tbk.GetBalance(_symbol, _from)>= _amount, "Insufficient balance");
+        require(erc20Address != address(0), "Unsupported token");
+        require(tbk.GetBalance(_symbol, _from) >= _amount, "Insufficient balance");
 
         IERC20 erc20 = IERC20(erc20Address);
 
         uint256 totalAmount = _amount * (10 ** erc20.decimals());
-        uint256 feeAmount = totalAmount * feePerThousand[_symbol] / 1000;
+        uint256 feeAmount = totalAmount * tbk.GetTokenFee(_symbol) / 1000;
         
         tbk.WithdrawBalance(erc20Address, _from, _amount);
         erc20.transfer(_to, totalAmount - feeAmount);
@@ -185,11 +192,6 @@ contract TBKservice{
 
         return ITBK(proxy.GetContractAddress("TBKdata")).GetAddress(_symbol);
     }
-
-    function GetFee(string calldata _symbol) public view returns(uint8){
-
-        return feePerThousand[_symbol];
-    }
     
     function GetManager() public view returns(address){
 
@@ -205,7 +207,9 @@ contract TBKservice{
 
     function Claim(string calldata _symbol, uint32 _amount) public payable returns(bool){
 
-        require(msg.value > 0, "Manager fee is zero");
+        ITBK tbk = ITBK(proxy.GetContractAddress("TBKdata"));
+
+        require(msg.value == tbk.GetPolFee(), "Improper fee amount");
 
         (uint256 totalAmount, uint256 claimAmount, uint256 feeAmount) = _claim(_symbol, _amount);
         payable(address(managerAddress)).call{value : msg.value}("");
@@ -216,8 +220,10 @@ contract TBKservice{
     }
     
     function Topup(address _to, string calldata _symbol, uint32 _amount, uint8 _server, string calldata _character) public payable returns(bool){
-        
-        require(msg.value > 0, "Manager fee is zero");
+
+        ITBK tbk = ITBK(proxy.GetContractAddress("TBKdata"));
+
+        require(msg.value == tbk.GetPolFee(), "Improper fee amount");
 
         uint32 topupAmount = _topup(_to, _symbol, _amount);
         payable(address(managerAddress)).call{value : msg.value}("");
@@ -243,18 +249,11 @@ contract TBKservice{
 
         ITBK tbk = ITBK(proxy.GetContractAddress("TBKdata"));
 
-        require(tbk.GetAddress(_symbol) != address(0), "Token unsupported");
+        require(tbk.GetAddress(_symbol) != address(0), "Unsupported token");
 
         bytes32 key = sha256(abi.encodePacked(msg.sender, _hash));
 
         tbk.SetKey(_symbol, msg.sender, key);
-
-        return true;
-    }
-
-    function SetFee(string calldata _symbol, uint8 _perThousand) public ownerOnly returns(bool){
-
-        feePerThousand[_symbol] = _perThousand;
 
         return true;
     }

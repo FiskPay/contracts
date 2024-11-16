@@ -1,11 +1,11 @@
 //SPDX-License-Identifier: MIT
 
-pragma solidity 0.8.24;
+pragma solidity 0.8.28;
 
 interface IProxy{
 
     function Owner() external view returns(address);
-    function GetContractAddress(string calldata _name) external view returns(address);
+    function GetContractAddress(string calldata name) external view returns(address);
 }
 
 interface IERC20{
@@ -32,6 +32,8 @@ contract TBKdata{
 
 //-----------------------------------------------------------------------// v NUMBERS
 
+    uint256 private polFee = 12500000000000000;
+
 //-----------------------------------------------------------------------// v BYTES
 
 //-----------------------------------------------------------------------// v STRINGS
@@ -45,7 +47,8 @@ contract TBKdata{
 
 //-----------------------------------------------------------------------// v MAPPINGS
 
-    mapping(string => address) private token;
+    mapping(string => address) private tokenAddress;
+    mapping(string => uint8) private tokenFee;
     mapping(string => mapping(address => uint32)) private balance;
     mapping(string => mapping(address => bytes32)) private key;
 
@@ -76,7 +79,7 @@ contract TBKdata{
 
     function GetAddress(string calldata _symbol) public view returns(address){
 
-        return token[_symbol];
+        return tokenAddress[_symbol];
     }
 
     function GetBalance(string calldata _symbol, address _client) public view returns(uint32){
@@ -88,6 +91,16 @@ contract TBKdata{
 
         return key[_symbol][_client];
     }
+
+    function GetTokenFee(string calldata _symbol) public view returns(uint8){
+
+        return tokenFee[_symbol];
+    }
+
+    function GetPolFee() public view returns (uint256){
+
+        return polFee;
+    }
 //-----------------------------------------------------------------------// v SET FUNTIONS
 
     function AddToken(address _contract) public ownerOnly returns(bool){
@@ -98,11 +111,13 @@ contract TBKdata{
 
         for(i; i < depth; i++){
 
-            if(token[tokens[i]] == _contract)
+            if(tokenAddress[tokens[i]] == _contract)
                 revert("Already added");
         }
 
-        token[symbol] = _contract;
+        tokenAddress[symbol] = _contract;
+        tokenFee[symbol] = 10;
+
         tokens.push(symbol);
 
         return true;
@@ -119,7 +134,9 @@ contract TBKdata{
 
             if(sha256(abi.encodePacked(tokens[i])) == sha256(abi.encodePacked(_symbol))){
 
-                delete token[_symbol];
+                delete tokenAddress[_symbol];
+                delete tokenFee[_symbol];
+
                 tokens[i] = lastToken;
                 tokens.pop();
 
@@ -128,6 +145,20 @@ contract TBKdata{
         }
 
         revert("Already removed");
+    }
+
+    function SetTokenFee(string calldata _symbol, uint8 _perThousand) public ownerOnly returns(bool){
+
+        tokenFee[_symbol] = _perThousand;
+
+        return true;
+    }
+
+    function SetPolFee(uint256 _amount) public ownerOnly returns(bool){
+
+        polFee = _amount;
+
+        return true;
     }
 
     function DepositBalance(address _token, address _client, uint32 _amount) public serviceOnly returns(bool){
