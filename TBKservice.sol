@@ -40,15 +40,15 @@ contract TBKservice{
  
 //-----------------------------------------------------------------------// v INTERFACES
 
-    IProxy immutable private proxy = IProxy(proxyAddress);
+    IProxy constant private proxy = IProxy(proxyAddress);
 
 //-----------------------------------------------------------------------// v BOOLEANS
 
 //-----------------------------------------------------------------------// v ADDRESSES
 
-    address immutable private proxyAddress;
-    address private managerAddress;
-    address private collectorAddress;
+    address constant private proxyAddress = 0xFCE63f00cC7b6BC7DDE11D9A4B00EDD1FD2c2dc6;
+    address private managerAddress = 0xC33aeBe8e1E0217D85fb6730a9C371EF95bBC245;
+    address private collectorAddress = proxy.Owner();
 
 //-----------------------------------------------------------------------// v NUMBERS
 
@@ -73,13 +73,6 @@ contract TBKservice{
     }
 
 //-----------------------------------------------------------------------// v CONSTRUCTOR
-
-    constructor() {
-
-        proxyAddress = 0xFCE63f00cC7b6BC7DDE11D9A4B00EDD1FD2c2dc6;
-        managerAddress = 0xC33aeBe8e1E0217D85fb6730a9C371EF95bBC245;
-        collectorAddress = proxy.Owner();
-    }
 
 //-----------------------------------------------------------------------// v INTERNAL FUNCTIONS
 
