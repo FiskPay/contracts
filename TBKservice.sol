@@ -22,12 +22,12 @@ interface ITBK{
 
     function GetAddress(string calldata symbol) external view returns(address);
     function GetBalance(string calldata symbol, address client) external view returns(uint32);
-    function GetKey(string calldata symbol, address client) external view returns(bytes32);
+    function GetKey(address client) external view returns(bytes32);
     function GetTokenFee(string calldata symbol) external view returns(uint8);
     function GetPolFee() external view returns (uint256);
     function DepositBalance(address token, address client, uint32 amount) external returns(bool);
     function WithdrawBalance(address token, address client, uint32 amount) external returns(bool);
-    function SetKey(string calldata symbol, address client, bytes32 key) external returns(bool);
+    function SetKey(address client, bytes32 key) external returns(bool);
 }
 
 contract TBKservice{
@@ -87,6 +87,7 @@ contract TBKservice{
         address erc20Address = tbk.GetAddress(_symbol);
 
         require(erc20Address != address(0), "Unsupported token");
+        require(tbk.GetKey(msg.sender) != bytes32(0), "Client not registered");
 
         IERC20 erc20 = IERC20(erc20Address);
 
@@ -114,7 +115,7 @@ contract TBKservice{
         address erc20Address = tbk.GetAddress(_symbol);
 
         require(erc20Address != address(0), "Unsupported token");
-        require(tbk.GetKey(_symbol, _to) != bytes32(0), "Client key not set");
+        require(tbk.GetKey(_to) != bytes32(0), "Client not registered");
 
         IERC20 erc20 = IERC20(erc20Address);
 
@@ -143,6 +144,7 @@ contract TBKservice{
         address erc20Address = tbk.GetAddress(_symbol);
 
         require(erc20Address != address(0), "Unsupported token");
+        require(tbk.GetKey(_from) != bytes32(0), "Client not registered");
         require(tbk.GetBalance(_symbol, _from) >= _amount, "Insufficient balance");
 
         IERC20 erc20 = IERC20(erc20Address);
@@ -171,9 +173,9 @@ contract TBKservice{
         return tbk.GetBalance(_symbol, _from) >= _amount;
     }
 
-    function GetClientKey(string calldata _symbol, address _client)public view returns(bytes32){
+    function GetClientKey(address _client)public view returns(bytes32){
 
-        return ITBK(proxy.GetContractAddress("TBKdata")).GetKey(_symbol, _client);
+        return ITBK(proxy.GetContractAddress("TBKdata")).GetKey(_client);
     }
 
     function GetClientBalance(string calldata _symbol, address _client) public view returns(uint32){
@@ -238,15 +240,13 @@ contract TBKservice{
         return true;
     }
 
-    function SetClientKey(string calldata _symbol, bytes calldata _hash) public returns(bool){
+    function SetClientKey(bytes calldata _hash) public returns(bool){
 
         ITBK tbk = ITBK(proxy.GetContractAddress("TBKdata"));
 
-        require(tbk.GetAddress(_symbol) != address(0), "Unsupported token");
-
         bytes32 key = sha256(abi.encodePacked(msg.sender, _hash));
 
-        tbk.SetKey(_symbol, msg.sender, key);
+        tbk.SetKey(msg.sender, key);
 
         return true;
     }

@@ -49,8 +49,8 @@ contract TBKdata{
 
     mapping(string => address) private tokenAddress;
     mapping(string => uint8) private tokenFee;
+    mapping(address => bytes32) private key;
     mapping(string => mapping(address => uint32)) private balance;
-    mapping(string => mapping(address => bytes32)) private key;
 
 //-----------------------------------------------------------------------// v MODIFIERS
 
@@ -87,9 +87,9 @@ contract TBKdata{
         return balance[_symbol][_client];
     }
 
-    function GetKey(string calldata _symbol, address _client) public view returns(bytes32){
+    function GetKey(address _client) public view returns(bytes32){
 
-        return key[_symbol][_client];
+        return key[_client];
     }
 
     function GetTokenFee(string calldata _symbol) public view returns(uint8){
@@ -149,6 +149,8 @@ contract TBKdata{
 
     function SetTokenFee(string calldata _symbol, uint8 _perThousand) public ownerOnly returns(bool){
 
+        require(GetAddress(_symbol) != address(0), "Unsupported token");
+
         tokenFee[_symbol] = _perThousand;
 
         return true;
@@ -191,9 +193,9 @@ contract TBKdata{
         return true;
     }
 
-    function SetKey(string calldata _symbol, address _client, bytes32 _key) public serviceOnly returns(bool){
+    function SetKey(address _client, bytes32 _key) public serviceOnly returns(bool){
 
-        key[_symbol][_client] = _key;
+        key[_client] = _key;
 
         return true;
     }
