@@ -570,6 +570,8 @@ contract Service{
 
         if(_signer == address(0))
             revert ZeroAddress();
+        if(_signer.code.length != 0)
+            revert InvalidSigner();
 
         address currentSigner = clients[msg.sender].signer;
         uint256 requiredFund = currentSigner == _signer ? 0 : signerFundAmount;
