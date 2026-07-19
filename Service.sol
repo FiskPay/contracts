@@ -60,18 +60,17 @@ contract Service{
 
 //-----------------------------------------------------------------------// v NUMBERS
 
-    uint256 private polFeeFlat = 0.125 ether;           // Native POL fee paid by players on topup.
-    uint256 private signerFundAmount = 4 ether;         // POL sent to a new signer wallet during registration.
-    uint256 private signerMinBalance = 4 ether;         // Signers above this native balance are not reimbursed.
     uint256 private reimbursePerWithdraw = 0.1 ether;   // Safety cap for one withdrawal gas reimbursement.
+    uint256 private polFeeFlat = 0.125 ether;           // Native POL fee paid by players on topup.
+    uint256 private signerFundAmount = 1 ether;         // POL sent to a new signer wallet during registration.
+    uint256 private signerMinBalance = 4 ether;         // Signers above this native balance are not reimbursed.
 
-
-    uint256 constant private maxPolFeeFlat = 5 ether;               // Highest POL topup fee the owner can configure.
-    uint256 constant private maxPolBalance = 100 ether;             // Contract POL balance target before topup fees redirect to owner.
     uint8 constant private maxTokenFeePerThousand = 250;            // Highest fee any token can be configured to charge (25%).
+    uint256 constant private maxPolFeeFlat = 5 ether;               // Highest POL topup fee the owner can configure.
     uint256 constant private maxSignerFundAmount = 5 ether;         // Highest initial POL funding sent to a signer.
     uint256 constant private maxSignerMinBalance = 5 ether;         // Highest signer balance threshold for reimbursement.
     uint256 constant private maxReimbursePerWithdraw = 0.5 ether;   // Highest reimbursement cap for a single withdrawal.
+    uint256 constant private maxPolBalance = 100 ether;             // Contract POL balance target before topup fees redirect to owner.
 
 
 //-----------------------------------------------------------------------// v STRINGS

@@ -151,6 +151,47 @@ contract Multisig{
         threshold = _getThreshold(ownerCount);
     }
 
+//-----------------------------------------------------------------------// v PRIVATE FUNCTIONS
+
+    // Sends native POL and reverts if the receiver rejects the transfer.
+    function _transferPol(address _to, uint256 _amount) private{
+
+        (bool ok,) = payable(_to).call{value : _amount}("");
+
+        if(!ok)
+            revert TransferFailed();
+    }
+
+    // Checks that a new owner is a unique normal wallet address.
+    function _validateNewOwner(address _owner) private view{
+
+        if(_owner == address(0) || isOwner[_owner])
+            revert InvalidOwner();
+        if(_owner.code.length != 0)
+            revert InvalidOwner();
+    }
+
+    // Calculates the strict-majority threshold for the current owner count.
+    function _getThreshold(uint256 _ownerCount) private pure returns(uint256){
+
+        if(_ownerCount < 2)
+            revert InvalidThreshold();
+
+        return(_ownerCount / 2 + 1);
+    }
+
+    // Sends ERC20 tokens and supports tokens that either return true or return no value.
+    function _transferToken(address _token, address _to, uint256 _amount) private{
+
+        if(_token.code.length == 0)
+            revert InvalidToken();
+
+        (bool ok, bytes memory data) = _token.call(abi.encodeWithSelector(IERC20.transfer.selector, _to, _amount));
+
+        if(!ok || (data.length != 0 && !abi.decode(data, (bool))))
+            revert TransferFailed();
+    }
+
 //-----------------------------------------------------------------------// v GET FUNCTIONS
 
     // Returns the fixed owner list.
@@ -468,47 +509,6 @@ contract Multisig{
         }
 
         return true;
-    }
-
-//-----------------------------------------------------------------------// v PRIVATE FUNCTIONS
-
-    // Sends native POL and reverts if the receiver rejects the transfer.
-    function _transferPol(address _to, uint256 _amount) private{
-
-        (bool ok,) = payable(_to).call{value : _amount}("");
-
-        if(!ok)
-            revert TransferFailed();
-    }
-
-    // Checks that a new owner is a unique normal wallet address.
-    function _validateNewOwner(address _owner) private view{
-
-        if(_owner == address(0) || isOwner[_owner])
-            revert InvalidOwner();
-        if(_owner.code.length != 0)
-            revert InvalidOwner();
-    }
-
-    // Calculates the strict-majority threshold for the current owner count.
-    function _getThreshold(uint256 _ownerCount) private pure returns(uint256){
-
-        if(_ownerCount < 2)
-            revert InvalidThreshold();
-
-        return(_ownerCount / 2 + 1);
-    }
-
-    // Sends ERC20 tokens and supports tokens that either return true or return no value.
-    function _transferToken(address _token, address _to, uint256 _amount) private{
-
-        if(_token.code.length == 0)
-            revert InvalidToken();
-
-        (bool ok, bytes memory data) = _token.call(abi.encodeWithSelector(IERC20.transfer.selector, _to, _amount));
-
-        if(!ok || (data.length != 0 && !abi.decode(data, (bool))))
-            revert TransferFailed();
     }
 
 //-----------------------------------------------------------------------// v DEFAULTS
