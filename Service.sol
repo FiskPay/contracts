@@ -33,7 +33,7 @@ contract Service{
     event Registered(address indexed client, address indexed signer);
     event Deposit(address indexed from, address indexed to, string symbol, uint32 amount, uint8 server, string character);
     event Withdrawal(address indexed from, address indexed to, string symbol, uint32 amount, uint8 server, string character, uint32 refund);
-    event TokenAdded(address indexed token, string symbol, uint8 fee);
+    event TokenAdded(address indexed token, string symbol);
     event TokenSymbolUpdated(address indexed token, string oldSymbol, string newSymbol);
     event TokenFeeSet(address indexed token, uint8 fee);
     event TokenTopupEnabledSet(address indexed token, bool enabled);
@@ -254,6 +254,35 @@ contract Service{
 
 //-----------------------------------------------------------------------// v GET FUNCTIONS
 
+    // Returns the service login key for a client wallet.
+    function GetClientKey(address _client) public view returns(bytes32){
+
+        return clients[_client].key;
+    }
+
+    // Returns the signer wallet registered for a client wallet.
+    function GetClientSignerAddress(address _client) public view returns(address){
+
+        return clients[_client].signer;
+    }
+
+    // Returns a client balance using a symbol lookup.
+    function GetClientBalance(string calldata _symbol, address _client) public view returns(uint32){
+
+        address token = tokenAddress[_symbol];
+
+        if(token == address(0))
+            return 0;
+
+        return clients[_client].balance[token];
+    }
+
+    // Returns a client balance by canonical token address.
+    function GetClientBalanceByToken(address _token, address _client) public view returns(uint32){
+
+        return clients[_client].balance[_token];
+    }
+
     // Returns token symbols for frontends while keeping balances address-based.
     function GetTokens() public view returns(string[] memory){
 
@@ -267,56 +296,15 @@ contract Service{
     }
 
     // Resolves a current token symbol to its token contract address.
-    function GetAddress(string calldata _symbol) public view returns(address){
-
-        return tokenAddress[_symbol];
-    }
-
-    // Compatibility alias used by the website and service.
     function GetTokenAddress(string calldata _symbol) public view returns(address){
 
         return tokenAddress[_symbol];
     }
 
-    // Returns a client balance using a symbol lookup.
-    function GetBalance(string calldata _symbol, address _client) public view returns(uint32){
+    // Returns cached token decimals by token address.
+    function GetTokenDecimals(address _token) public view returns(uint8){
 
-        address token = tokenAddress[_symbol];
-
-        if(token == address(0))
-            return 0;
-
-        return clients[_client].balance[token];
-    }
-
-    // Compatibility alias used by the website.
-    function GetClientBalance(string calldata _symbol, address _client) public view returns(uint32){
-
-        return GetBalance(_symbol, _client);
-    }
-
-    // Returns a client balance by canonical token address.
-    function GetBalanceByToken(address _token, address _client) public view returns(uint32){
-
-        return clients[_client].balance[_token];
-    }
-
-    // Returns the service login key for a client wallet.
-    function GetKey(address _client) public view returns(bytes32){
-
-        return clients[_client].key;
-    }
-
-    // Compatibility alias used by the service.
-    function GetClientKey(address _client) public view returns(bytes32){
-
-        return clients[_client].key;
-    }
-
-    // Returns the signer wallet registered for a client wallet.
-    function GetClientSignerAddress(address _client) public view returns(address){
-
-        return clients[_client].signer;
+        return tokenInfo[_token].decimals;
     }
 
     // Returns token fee by current symbol.
@@ -335,12 +323,6 @@ contract Service{
     function GetMaxTokenFeePerThousand() public pure returns(uint8){
 
         return maxTokenFeePerThousand;
-    }
-
-    // Returns cached token decimals by token address.
-    function GetTokenDecimals(address _token) public view returns(uint8){
-
-        return tokenInfo[_token].decimals;
     }
 
     // Returns the POL topup fee players must pay.
@@ -446,7 +428,7 @@ contract Service{
         tokenAddress[symbol] = _contract;
         tokens.push(_contract);
 
-        emit TokenAdded(_contract, symbol, 10);
+        emit TokenAdded(_contract, symbol);
 
         return true;
     }
@@ -478,14 +460,6 @@ contract Service{
         return true;
     }
 
-    // Sets the token fee in per-thousand units, e.g. 10 means 1%.
-    function SetTokenFee(address _contract, uint8 _perThousand) public ownerOnly returns(bool){
-
-        _setTokenFee(_contract, _perThousand);
-
-        return true;
-    }
-
     // Enables or disables new topups only; existing balances stay withdrawable.
     function SetTokenTopupEnabled(address _contract, bool _enabled) public ownerOnly returns(bool){
 
@@ -495,6 +469,14 @@ contract Service{
         tokenInfo[_contract].topupEnabled = _enabled;
 
         emit TokenTopupEnabledSet(_contract, _enabled);
+
+        return true;
+    }
+
+    // Sets the token fee in per-thousand units, e.g. 10 means 1%.
+    function SetTokenFee(address _contract, uint8 _perThousand) public ownerOnly returns(bool){
+
+        _setTokenFee(_contract, _perThousand);
 
         return true;
     }
