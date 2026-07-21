@@ -4,6 +4,7 @@ pragma solidity 0.8.36;
 
 interface IERC20{
 
+    // Moves tokens from this contract to a recipient.
     function transfer(address to, uint256 amount) external returns(bool);
 }
 

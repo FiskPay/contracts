@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 
 interface IProxy{
 
-    // Returns the protocol owner used for admin actions and fee collection.
+    // Returns the protocol owner used for admin actions.
     function Owner() external view returns(address);
 }
 
@@ -30,21 +30,20 @@ contract Service{
 
 //-----------------------------------------------------------------------// v EVENTS
 
+    // Emitted when a client registers or updates its signer wallet.
     event Registered(address indexed client, address indexed signer);
+
+    // Emitted when a player deposits tokens into a client's service balance.
     event Deposit(address indexed from, address indexed to, string symbol, uint32 amount, uint8 server, string character);
+
+    // Emitted when a registered signer withdraws tokens from a client's balance to a player.
     event Withdrawal(address indexed from, address indexed to, string symbol, uint32 amount, uint8 server, string character, uint32 refund);
-    event TokenAdded(address indexed token, string symbol);
-    event TokenSymbolUpdated(address indexed token, string oldSymbol, string newSymbol);
-    event TokenFeeSet(address indexed token, uint8 fee);
-    event TokenTopupEnabledSet(address indexed token, bool enabled);
-    event PolFeeSet(uint256 amount);
-    event SignerFundAmountSet(uint256 amount);
-    event SignerMinBalanceSet(uint256 amount);
-    event ReimbursePerWithdrawSet(uint256 amount);
-    event PolWithdrawn(address indexed to, uint256 amount);
-    event PolFeeRedirected(address indexed to, uint256 amount);
-    event SignerReimbursed(address indexed signer, uint256 amount);
-    event DirectWithdraw(address indexed client, address indexed token, uint32 amount, uint256 claimed, uint256 fee);
+
+    // Emitted when a client directly claims tokens from its own service balance.
+    event DirectWithdrawal(address indexed client, address indexed token, uint32 amount, uint256 claimed);
+
+    // Emitted when a client withdraws POL from its own signer gas balance.
+    event GasBalanceWithdrawal(address indexed client, address indexed to, uint256 amount);
 
 //-----------------------------------------------------------------------// v INTERFACES
 
@@ -52,26 +51,30 @@ contract Service{
 
 //-----------------------------------------------------------------------// v BOOLEANS
 
-    bool private locked;
+    bool private locked;                                // Reentrancy guard status.
 
 //-----------------------------------------------------------------------// v ADDRESSES
 
     address constant private proxyAddress = 0xFCE63f00cC7b6BC7DDE11D9A4B00EDD1FD2c2dc6;
+    address private subscriptionToken = 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359; // Native Polygon USDC by default.
 
 //-----------------------------------------------------------------------// v NUMBERS
 
-    uint256 private reimbursePerWithdraw = 0.1 ether;   // Safety cap for one withdrawal gas reimbursement.
-    uint256 private polFeeFlat = 0.125 ether;           // Native POL fee paid by players on topup.
+    uint32[] private subscriptionPlanIds;               // All plan IDs ever created, including disabled plans.
+
+    uint32 private nextSubscriptionPlanId = 1;          // Next stable ID assigned to a new subscription plan.
+    uint8 private subscriptionTokenDecimals = 6;        // Cached decimals for subscription payment token.
+    uint32 constant private freeTrialDays = 30;         // Free subscription days granted only on first registration.
+
+    uint256 private polFee = 0.125 ether;           // Native POL fee paid by players to support signer gas.
     uint256 private signerFundAmount = 1 ether;         // POL sent to a new signer wallet during registration.
-    uint256 private signerMinBalance = 4 ether;         // Signers above this native balance are not reimbursed.
+    uint256 private signerBalanceTarget = 4 ether;      // Current target POL balance for each client signer.
+    uint256 private clientGasBalanceLimit = 8 ether;    // Current POL limit stored in one client's gas balance.
 
-    uint8 constant private maxTokenFeePerThousand = 250;            // Highest fee any token can be configured to charge (25%).
-    uint256 constant private maxPolFeeFlat = 5 ether;               // Highest POL topup fee the owner can configure.
-    uint256 constant private maxSignerFundAmount = 5 ether;         // Highest initial POL funding sent to a signer.
-    uint256 constant private maxSignerMinBalance = 5 ether;         // Highest signer balance threshold for reimbursement.
-    uint256 constant private maxReimbursePerWithdraw = 0.5 ether;   // Highest reimbursement cap for a single withdrawal.
-    uint256 constant private maxPolBalance = 100 ether;             // Contract POL balance target before topup fees redirect to owner.
-
+    uint256 constant private maxPolFee = 5 ether;               // Maximum allowed POL topup fee.
+    uint256 constant private maxSignerFundAmount = 10 ether;        // Maximum allowed initial signer funding.
+    uint256 constant private maxSignerBalanceTarget = 10 ether;     // Maximum allowed signer balance target.
+    uint256 constant private maxClientGasBalanceLimit = 20 ether;   // Maximum allowed per-client gas balance limit.
 
 //-----------------------------------------------------------------------// v STRINGS
 
@@ -84,7 +87,16 @@ contract Service{
 
         bytes32 key;                            // Service login key derived from client wallet and signup hash.
         address signer;                         // Hot wallet allowed to submit this client's player withdrawals.
-        mapping(address => uint32) balance;     // Client balances keyed by token address.
+        uint256 gasBalance;                     // Client-owned POL reserved for signer funding.
+        uint64 subscriptionExpiresAt;           // Unix timestamp until which player topups are enabled for this client.
+        mapping(address => uint32) balance;     // Client-owned token balances held by this contract, keyed by token address.
+    }
+
+    struct Plan{
+
+        uint256 price;                          // Whole subscription tokens; with USDC, 1 means 1 USDC.
+        uint32 daysCount;                       // Number of days added when the plan is purchased.
+        bool enabled;                           // Disabled plans remain stored but cannot be bought.
     }
 
     struct Token{
@@ -92,7 +104,6 @@ contract Service{
         bool added;                             // Distinguishes a real token from an empty mapping slot.
         bool topupEnabled;                      // Blocks new deposits only; withdrawals remain available.
         uint8 decimals;                         // Cached once to avoid repeated token calls in hot paths.
-        uint8 fee;                              // Fee per thousand, e.g. 10 means 1%.
         string symbol;                          // Display/lookup symbol; balances do not depend on this.
     }
 
@@ -101,6 +112,7 @@ contract Service{
     mapping(address => Client) private clients;         // Client wallet => client data.
     mapping(address => Token) private tokenInfo;        // Token address => token config.
     mapping(string => address) private tokenAddress;    // Current token symbol => token address.
+    mapping(uint32 => Plan) private subscriptionPlans; // Stable plan ID => plan data.
 
 //-----------------------------------------------------------------------// v ERRORS
 
@@ -115,6 +127,8 @@ contract Service{
     error InvalidFee();
     error InvalidSigner();
     error Expired();
+    error SubscriptionExpired();
+    error InvalidPlan();
     error InsufficientBalance();
     error TransferFailed();
 
@@ -139,7 +153,26 @@ contract Service{
         locked = false;
     }
 
+//-----------------------------------------------------------------------// v CONSTRUCTOR
+
+    constructor(){
+
+        _addSubscriptionPlan(5, 14);
+        _addSubscriptionPlan(10, 30);
+        _addSubscriptionPlan(15, 60);
+    }
+
 //-----------------------------------------------------------------------// v PRIVATE FUNCTIONS
+
+    // Stores a new enabled subscription plan and advances the next stable plan ID.
+    function _addSubscriptionPlan(uint256 _price, uint32 _daysCount) private returns(uint32 planId){
+
+        planId = nextSubscriptionPlanId;
+        nextSubscriptionPlanId++;
+
+        subscriptionPlans[planId] = Plan(_price, _daysCount, true);
+        subscriptionPlanIds.push(planId);
+    }
 
     // Transfers ERC20 tokens and accepts both standard bool returns and old no-return tokens.
     function _safeTransfer(address _token, address _to, uint256 _amount) private{
@@ -165,21 +198,20 @@ contract Service{
             revert TransferFailed();
     }
 
-    // Updates one token fee after checking the token exists and the fee is below the hard cap.
-    function _setTokenFee(address _token, uint8 _perThousand) private{
+    // Sends native POL and reverts if the receiver rejects it.
+    function _sendPol(address _to, uint256 _amount) private{
 
-        if(!tokenInfo[_token].added)
-            revert UnsupportedToken();
-        if(_perThousand > maxTokenFeePerThousand)
-            revert InvalidAmount();
+        if(_amount == 0)
+            return;
 
-        tokenInfo[_token].fee = _perThousand;
+        (bool ok, ) = payable(_to).call{value : _amount}("");
 
-        emit TokenFeeSet(_token, _perThousand);
+        if(!ok)
+            revert TransferFailed();
     }
 
     // Shared balance withdrawal logic used by player withdrawals and direct client claims.
-    function _withdrawBalance(address _token, address _client, uint32 _amount, address _to, address _feeTo) private returns(uint256 totalAmount, uint256 claimAmount, uint256 feeAmount){
+    function _withdrawBalance(address _token, address _client, uint32 _amount, address _to) private returns(uint256 totalAmount){
 
         Token memory token = tokenInfo[_token];
 
@@ -189,67 +221,102 @@ contract Service{
             revert InsufficientBalance();
 
         totalAmount = uint256(_amount) * (10 ** token.decimals);
-        feeAmount = totalAmount * token.fee / 1000;
-        claimAmount = totalAmount - feeAmount;
 
         // Effects happen before token transfers to reduce reentrancy risk.
         clients[_client].balance[_token] -= _amount;
 
-        _safeTransfer(_token, _to, claimAmount);
-        _safeTransfer(_token, _feeTo, feeAmount);
+        _safeTransfer(_token, _to, totalAmount);
     }
 
-    // Reimburses a registered signer for withdrawal gas when below the configured balance threshold.
-    function _reimburseSigner(address _signer, uint256 _amount) private returns(uint256){
+    // Pulls topup tokens into the contract and credits the client only after exact receipt.
+    function _depositBalance(address _token, uint8 _decimals, address _client, uint32 _amount) private{
 
-        if(_amount == 0 || _signer.balance >= signerMinBalance || reimbursePerWithdraw == 0)
-            return 0;
+        uint256 depositAmount = uint256(_amount) * (10 ** _decimals);
+        uint256 balanceBefore = IERC20(_token).balanceOf(address(this));
 
-        uint256 amount = _amount;
-        uint256 available = address(this).balance;
+        _safeTransferFrom(_token, msg.sender, address(this), depositAmount);
 
-        if(amount > reimbursePerWithdraw)
-            amount = reimbursePerWithdraw;
-        if(amount > available)
-            amount = available;
-        if(amount == 0)
-            return 0;
+        uint256 balanceAfter = IERC20(_token).balanceOf(address(this));
 
-        (bool ok, ) = payable(_signer).call{value : amount}("");
-
-        if(!ok)
+        if(balanceAfter < balanceBefore || balanceAfter - balanceBefore != depositAmount)
             revert TransferFailed();
 
-        emit SignerReimbursed(_signer, amount);
-
-        return amount;
+        clients[_client].balance[_token] += _amount;
     }
 
-    // Keeps POL fees until the reserve cap is reached, then redirects only the overflow to the owner.
-    function _redirectPolFeeIfCapped(uint256 _amount) private{
+    // Converts whole-token subscription prices into the token's smallest base units.
+    function _subscriptionPriceToBase(uint256 _price) private view returns(uint256){
+
+        return _price * (10 ** subscriptionTokenDecimals);
+    }
+
+    // Uses topup POL to fund the signer first, then client gas balance, then returns excess to the player.
+    function _handleTopupGas(Client storage _client, address _signer, address _payer, uint256 _amount) private{
 
         if(_amount == 0)
             return;
 
-        uint256 balanceBeforeFee = address(this).balance - _amount;
+        uint256 remaining = _amount;
+        uint256 signerBalance = _signer.balance;
+        uint256 target = signerBalanceTarget;
 
-        if(balanceBeforeFee < maxPolBalance){
+        if(signerBalance < target){
 
-            uint256 balanceAfterFee = balanceBeforeFee + _amount;
+            uint256 signerFund = target - signerBalance;
 
-            if(balanceAfterFee <= maxPolBalance)
-                return;
+            if(signerFund > remaining)
+                signerFund = remaining;
 
-            _amount = balanceAfterFee - maxPolBalance;
+            unchecked{ remaining -= signerFund; }
+            _sendPol(_signer, signerFund);
         }
 
-        address owner = proxy.Owner();
-        (bool ok, ) = payable(owner).call{value : _amount}("");
+        if(remaining == 0)
+            return;
 
-        if(!ok)
-            revert TransferFailed();
+        uint256 gasBalance = _client.gasBalance;
+        uint256 limit = clientGasBalanceLimit;
 
-        emit PolFeeRedirected(owner, _amount);
+        if(gasBalance < limit){
+
+            uint256 credit = limit - gasBalance;
+
+            if(credit > remaining)
+                credit = remaining;
+
+            unchecked{
+                _client.gasBalance = gasBalance + credit;
+                remaining -= credit;
+            }
+        }
+
+        if(remaining > 0)
+            _sendPol(_payer, remaining);
+    }
+
+    // Funds a signer from its client's stored gas balance until the signer reaches the configured cap.
+    function _fundSignerFromClientGas(address _client, address _signer) private{
+
+        uint256 signerBalance = _signer.balance;
+        uint256 target = signerBalanceTarget;
+
+        if(signerBalance >= target)
+            return;
+
+        Client storage client = clients[_client];
+        uint256 amount = client.gasBalance;
+
+        if(amount == 0)
+            return;
+
+        uint256 signerNeed = target - signerBalance;
+
+        if(amount > signerNeed)
+            amount = signerNeed;
+
+        client.gasBalance -= amount;
+
+        _sendPol(_signer, amount);
     }
 
 //-----------------------------------------------------------------------// v GET FUNCTIONS
@@ -307,40 +374,28 @@ contract Service{
         return tokenInfo[_token].decimals;
     }
 
-    // Returns token fee by current symbol.
-    function GetTokenFee(string calldata _symbol) public view returns(uint8){
-
-        return tokenInfo[tokenAddress[_symbol]].fee;
-    }
-
-    // Returns token fee by canonical token address.
-    function GetTokenFeeByAddress(address _token) public view returns(uint8){
-
-        return tokenInfo[_token].fee;
-    }
-
-    // Returns the hard cap for every per-token fee.
-    function GetMaxTokenFeePerThousand() public pure returns(uint8){
-
-        return maxTokenFeePerThousand;
-    }
-
     // Returns the POL topup fee players must pay.
     function GetPolFee() public view returns(uint256){
 
-        return polFeeFlat;
+        return polFee;
     }
 
-    // Returns the hard cap for polFeeFlat.
-    function GetMaxPolFeeFlat() public pure returns(uint256){
+    // Returns the maximum allowed polFee.
+    function GetMaxPolFee() public pure returns(uint256){
 
-        return maxPolFeeFlat;
+        return maxPolFee;
     }
 
-    // Returns the POL reserve cap after which topup POL fees are redirected to owner.
-    function GetMaxPolBalance() public pure returns(uint256){
+    // Returns the current POL limit each client can keep in its gas balance.
+    function GetClientGasBalanceLimit() public view returns(uint256){
 
-        return maxPolBalance;
+        return clientGasBalanceLimit;
+    }
+
+    // Returns the maximum allowed clientGasBalanceLimit.
+    function GetMaxClientGasBalanceLimit() public pure returns(uint256){
+
+        return maxClientGasBalanceLimit;
     }
 
     // Returns the POL amount sent to a new signer during registration.
@@ -349,34 +404,110 @@ contract Service{
         return signerFundAmount;
     }
 
-    // Returns the hard cap for signerFundAmount.
+    // Returns the maximum allowed signerFundAmount.
     function GetMaxSignerFundAmount() public pure returns(uint256){
 
         return maxSignerFundAmount;
     }
 
-    // Returns the signer balance threshold below which reimbursement can happen.
-    function GetSignerMinBalance() public view returns(uint256){
+    // Returns the signer POL balance target.
+    function GetSignerBalanceTarget() public view returns(uint256){
 
-        return signerMinBalance;
+        return signerBalanceTarget;
     }
 
-    // Returns the hard cap for signerMinBalance.
-    function GetMaxSignerMinBalance() public pure returns(uint256){
+    // Returns the maximum allowed signerBalanceTarget.
+    function GetMaxSignerBalanceTarget() public pure returns(uint256){
 
-        return maxSignerMinBalance;
+        return maxSignerBalanceTarget;
     }
 
-    // Returns the current signer reimbursement cap for one withdrawal.
-    function GetReimbursePerWithdraw() public view returns(uint256){
+    // Returns POL owned by a client for future signer funding or manual withdrawal.
+    function GetClientGasBalance(address _client) public view returns(uint256){
 
-        return reimbursePerWithdraw;
+        return clients[_client].gasBalance;
     }
 
-    // Returns the hard cap for reimbursePerWithdraw.
-    function GetMaxReimbursePerWithdraw() public pure returns(uint256){
+    // Returns the ERC20 token accepted for subscription payments.
+    function GetSubscriptionToken() public view returns(address){
 
-        return maxReimbursePerWithdraw;
+        return subscriptionToken;
+    }
+
+    // Returns cached decimals for the subscription token.
+    function GetSubscriptionTokenDecimals() public view returns(uint8){
+
+        return subscriptionTokenDecimals;
+    }
+
+    // Returns one subscription plan by stable ID.
+    function GetSubscriptionPlan(uint32 _planId) public view returns(uint256 price, uint32 daysCount, bool enabled){
+
+        Plan memory plan = subscriptionPlans[_planId];
+
+        return (plan.price, plan.daysCount, plan.enabled);
+    }
+
+    // Returns every plan ID ever created, including disabled plans.
+    function GetSubscriptionPlanIds() public view returns(uint32[] memory){
+
+        return subscriptionPlanIds;
+    }
+
+    // Returns enabled subscription plans in array form for frontend display.
+    function GetActiveSubscriptionPlans() public view returns(uint32[] memory ids, uint256[] memory prices, uint32[] memory daysCounts){
+
+        uint256 activeCount = 0;
+        uint256 depth = subscriptionPlanIds.length;
+
+        for(uint256 i = 0; i < depth; i++){
+
+            if(subscriptionPlans[subscriptionPlanIds[i]].enabled)
+                activeCount++;
+        }
+
+        ids = new uint32[](activeCount);
+        prices = new uint256[](activeCount);
+        daysCounts = new uint32[](activeCount);
+
+        uint256 index = 0;
+
+        for(uint256 i = 0; i < depth; i++){
+
+            uint32 planId = subscriptionPlanIds[i];
+            Plan memory plan = subscriptionPlans[planId];
+
+            if(!plan.enabled)
+                continue;
+
+            ids[index] = planId;
+            prices[index] = plan.price;
+            daysCounts[index] = plan.daysCount;
+            index++;
+        }
+    }
+
+    // Returns the timestamp when a client's subscription expires.
+    function GetClientSubscriptionExpiresAt(address _client) public view returns(uint64){
+
+        return clients[_client].subscriptionExpiresAt;
+    }
+
+    // Returns full days left in a client's current subscription.
+    function GetClientSubscriptionDaysLeft(address _client) public view returns(uint32){
+
+        uint64 expiresAt = clients[_client].subscriptionExpiresAt;
+
+        if(expiresAt <= block.timestamp)
+            return 0;
+
+        return uint32((expiresAt - block.timestamp) / 1 days);
+    }
+
+    // Checks whether a client can currently receive player topups.
+    function IsClientSubscriptionActive(address _client) public view returns(bool){
+
+        return clients[_client].subscriptionExpiresAt > block.timestamp;
     }
 
     // Checks whether a client has a signer registered.
@@ -415,6 +546,8 @@ contract Service{
 
         if(_contract == address(0))
             revert ZeroAddress();
+        if(_contract.code.length == 0)
+            revert UnsupportedToken();
         if(tokenInfo[_contract].added)
             revert AlreadyAdded();
 
@@ -424,11 +557,9 @@ contract Service{
         if(tokenAddress[symbol] != address(0))
             revert AliasUsed();
 
-        tokenInfo[_contract] = Token(true, true, erc20.decimals(), 10, symbol);
+        tokenInfo[_contract] = Token(true, true, erc20.decimals(), symbol);
         tokenAddress[symbol] = _contract;
         tokens.push(_contract);
-
-        emit TokenAdded(_contract, symbol);
 
         return true;
     }
@@ -455,8 +586,6 @@ contract Service{
         tokenAddress[newSymbol] = _contract;
         tokenInfo[_contract].symbol = newSymbol;
 
-        emit TokenSymbolUpdated(_contract, oldSymbol, newSymbol);
-
         return true;
     }
 
@@ -468,41 +597,16 @@ contract Service{
 
         tokenInfo[_contract].topupEnabled = _enabled;
 
-        emit TokenTopupEnabledSet(_contract, _enabled);
-
-        return true;
-    }
-
-    // Sets the token fee in per-thousand units, e.g. 10 means 1%.
-    function SetTokenFee(address _contract, uint8 _perThousand) public ownerOnly returns(bool){
-
-        _setTokenFee(_contract, _perThousand);
-
-        return true;
-    }
-
-    // Sets the token fee by current symbol for admin convenience.
-    function SetTokenFeeBySymbol(string calldata _symbol, uint8 _perThousand) public ownerOnly returns(bool){
-
-        address token = tokenAddress[_symbol];
-
-        if(token == address(0))
-            revert UnsupportedToken();
-
-        _setTokenFee(token, _perThousand);
-
         return true;
     }
 
     // Sets the native POL fee required on player topups.
     function SetPolFee(uint256 _amount) public ownerOnly returns(bool){
 
-        if(_amount > maxPolFeeFlat)
+        if(_amount > maxPolFee)
             revert InvalidAmount();
 
-        polFeeFlat = _amount;
-
-        emit PolFeeSet(_amount);
+        polFee = _amount;
 
         return true;
     }
@@ -515,33 +619,111 @@ contract Service{
 
         signerFundAmount = _amount;
 
-        emit SignerFundAmountSet(_amount);
+        return true;
+    }
+
+    // Sets the signer POL balance target.
+    function SetSignerBalanceTarget(uint256 _amount) public ownerOnly returns(bool){
+
+        if(_amount > maxSignerBalanceTarget)
+            revert InvalidAmount();
+
+        signerBalanceTarget = _amount;
 
         return true;
     }
 
-    // Sets the minimum signer balance target for reimbursement decisions.
-    function SetSignerMinBalance(uint256 _amount) public ownerOnly returns(bool){
+    // Sets the maximum POL amount each client can store for signer funding.
+    function SetClientGasBalanceLimit(uint256 _amount) public ownerOnly returns(bool){
 
-        if(_amount > maxSignerMinBalance)
+        if(_amount > maxClientGasBalanceLimit)
             revert InvalidAmount();
 
-        signerMinBalance = _amount;
-
-        emit SignerMinBalanceSet(_amount);
+        clientGasBalanceLimit = _amount;
 
         return true;
     }
 
-    // Sets the signer reimbursement cap paid for one withdrawal.
-    function SetReimbursePerWithdraw(uint256 _amount) public ownerOnly returns(bool){
+    // Sets the ERC20 token accepted for subscription payments and caches its decimals.
+    function SetSubscriptionToken(address _token) public ownerOnly returns(bool){
 
-        if(_amount > maxReimbursePerWithdraw)
+        if(_token == address(0))
+            revert ZeroAddress();
+        if(_token.code.length == 0)
+            revert UnsupportedToken();
+
+        subscriptionToken = _token;
+        subscriptionTokenDecimals = IERC20(_token).decimals();
+
+        return true;
+    }
+
+    // Adds a new enabled subscription plan and returns its stable ID.
+    function AddSubscriptionPlan(uint256 _price, uint32 _daysCount) public ownerOnly returns(uint32 planId){
+
+        if(_price == 0 || _daysCount == 0)
             revert InvalidAmount();
 
-        reimbursePerWithdraw = _amount;
+        planId = _addSubscriptionPlan(_price, _daysCount);
+    }
 
-        emit ReimbursePerWithdrawSet(_amount);
+    // Updates an existing enabled subscription plan.
+    function SetSubscriptionPlan(uint32 _planId, uint256 _price, uint32 _daysCount) public ownerOnly returns(bool){
+
+        Plan storage plan = subscriptionPlans[_planId];
+
+        if(!plan.enabled)
+            revert InvalidPlan();
+        if(_price == 0 || _daysCount == 0)
+            revert InvalidAmount();
+
+        plan.price = _price;
+        plan.daysCount = _daysCount;
+
+        return true;
+    }
+
+    // Disables a subscription plan without changing other plan IDs.
+    function RemoveSubscriptionPlan(uint32 _planId) public ownerOnly returns(bool){
+
+        Plan storage plan = subscriptionPlans[_planId];
+
+        if(!plan.enabled)
+            revert InvalidPlan();
+
+        plan.enabled = false;
+
+        return true;
+    }
+
+    // Lets a registered client buy subscription time using the configured subscription token.
+    function PaySubscription(uint32 _planId) public nonReentrant returns(bool){
+
+        if(clients[msg.sender].signer == address(0))
+            revert ClientNotRegistered();
+
+        Plan memory plan = subscriptionPlans[_planId];
+
+        if(!plan.enabled)
+            revert InvalidPlan();
+
+        uint256 paymentAmount = _subscriptionPriceToBase(plan.price);
+        address owner = proxy.Owner();
+        address token = subscriptionToken;
+
+        _safeTransferFrom(token, msg.sender, owner, paymentAmount);
+
+        uint256 start = clients[msg.sender].subscriptionExpiresAt;
+
+        if(start < block.timestamp)
+            start = block.timestamp;
+
+        uint256 expiresAt = start + uint256(plan.daysCount) * 1 days;
+
+        if(expiresAt > type(uint64).max)
+            revert InvalidAmount();
+
+        clients[msg.sender].subscriptionExpiresAt = uint64(expiresAt);
 
         return true;
     }
@@ -565,13 +747,10 @@ contract Service{
         client.key = sha256(abi.encodePacked(msg.sender, _hash));
         client.signer = _signer;
 
-        if(requiredFund > 0){
+        if(client.subscriptionExpiresAt == 0)
+            client.subscriptionExpiresAt = uint64(block.timestamp + uint256(freeTrialDays) * 1 days);
 
-            (bool ok, ) = payable(_signer).call{value : requiredFund}("");
-
-            if(!ok)
-                revert TransferFailed();
-        }
+        _sendPol(_signer, requiredFund);
 
         emit Registered(msg.sender, _signer);
 
@@ -586,26 +765,20 @@ contract Service{
 
         if(_amount == 0)
             revert InvalidAmount();
-        if(msg.value != polFeeFlat)
+        if(msg.value != polFee)
             revert InvalidFee();
         if(!token.added || !token.topupEnabled)
             revert UnsupportedToken();
-        if(clients[_to].signer == address(0))
+        Client storage client = clients[_to];
+        address signer = client.signer;
+
+        if(signer == address(0))
             revert ClientNotRegistered();
+        if(!IsClientSubscriptionActive(_to))
+            revert SubscriptionExpired();
 
-        _redirectPolFeeIfCapped(msg.value);
-
-        uint256 depositAmount = uint256(_amount) * (10 ** token.decimals);
-        uint256 balanceBefore = IERC20(tokenAddress_).balanceOf(address(this));
-
-        _safeTransferFrom(tokenAddress_, msg.sender, address(this), depositAmount);
-
-        uint256 balanceAfter = IERC20(tokenAddress_).balanceOf(address(this));
-
-        if(balanceAfter < balanceBefore || balanceAfter - balanceBefore != depositAmount)
-            revert TransferFailed();
-
-        clients[_to].balance[tokenAddress_] += _amount;
+        _depositBalance(tokenAddress_, token.decimals, _to, _amount);
+        _handleTopupGas(client, signer, msg.sender, msg.value);
 
         emit Deposit(msg.sender, _to, _symbol, _amount, _server, _character);
 
@@ -615,7 +788,6 @@ contract Service{
     // Lets the registered signer submit a player withdrawal from the client balance.
     function Withdraw(address _from, address _to, string calldata _symbol, uint32 _amount, uint8 _server, string calldata _character, uint32 _refund) public nonReentrant returns(bool){
 
-        uint256 gasStart = gasleft();
         address signer = clients[_from].signer;
 
         if(_amount == 0)
@@ -629,12 +801,10 @@ contract Service{
         if(_refund < uint32(block.timestamp))
             revert Expired();
 
-        _withdrawBalance(tokenAddress[_symbol], _from, _amount, _to, proxy.Owner());
+        _withdrawBalance(tokenAddress[_symbol], _from, _amount, _to);
+        _fundSignerFromClientGas(_from, signer);
 
         emit Withdrawal(_from, _to, _symbol, _amount, _server, _character, _refund);
-
-        // Adds a small overhead estimate for reimbursement call, event, and function cleanup gas.
-        _reimburseSigner(signer, (gasStart - gasleft() + 30000) * tx.gasprice);
 
         return true;
     }
@@ -645,36 +815,45 @@ contract Service{
         if(_amount == 0)
             revert InvalidAmount();
 
-        (, uint256 claimAmount, uint256 feeAmount) = _withdrawBalance(_token, msg.sender, _amount, msg.sender, proxy.Owner());
+        uint256 claimAmount = _withdrawBalance(_token, msg.sender, _amount, msg.sender);
 
-        emit DirectWithdraw(msg.sender, _token, _amount, claimAmount, feeAmount);
+        emit DirectWithdrawal(msg.sender, _token, _amount, claimAmount);
 
         return true;
     }
 
-    // Lets the owner withdraw accumulated native POL from topup fees.
-    function WithdrawPol(address _to, uint256 _amount) public ownerOnly nonReentrant returns(bool){
+    // Lets clients withdraw POL from their own gas balance.
+    function WithdrawGasBalance(address _to, uint256 _amount) public nonReentrant returns(bool){
 
         if(_to == address(0))
             revert ZeroAddress();
-        if(address(this).balance < _amount)
+        if(_amount == 0)
+            revert InvalidAmount();
+        Client storage client = clients[msg.sender];
+
+        if(client.gasBalance < _amount)
             revert InsufficientBalance();
 
-        (bool ok, ) = payable(_to).call{value : _amount}("");
+        client.gasBalance -= _amount;
 
-        if(!ok)
-            revert TransferFailed();
+        _sendPol(_to, _amount);
 
-        emit PolWithdrawn(_to, _amount);
+        emit GasBalanceWithdrawal(msg.sender, _to, _amount);
 
         return true;
     }
 
 //-----------------------------------------------------------------------// v DEFAULTS
 
-    // Accepts native POL sent directly to the contract.
-    receive() external payable {}
+    // Blocks direct POL sends because all accepted POL must belong to registration, topup, or gas withdrawal flows.
+    receive() external payable {
 
-    // Accepts native POL sent with unknown calldata.
-    fallback() external payable{}
+        revert InvalidAmount();
+    }
+
+    // Blocks unknown calldata and accidental POL sends.
+    fallback() external payable{
+
+        revert InvalidAmount();
+    }
 }
