@@ -434,7 +434,7 @@ contract Service{
     }
 
     // Refreshes a known token symbol from the token contract after ticker changes.
-    function UpdateTokenSymbol(address _contract) public returns(bool){
+    function UpdateTokenSymbol(address _contract) public ownerOnly returns(bool){
 
         if(!tokenInfo[_contract].added)
             revert UnsupportedToken();
