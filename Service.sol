@@ -42,8 +42,8 @@ contract Service{
     // Emitted when a client directly claims tokens from its own service balance.
     event DirectWithdrawal(address indexed client, address indexed token, uint32 amount, uint256 claimed);
 
-    // Emitted when a client withdraws POL from its own signer gas balance.
-    event GasBalanceWithdrawal(address indexed client, address indexed to, uint256 amount);
+    // Emitted when a client withdraws POL from its own signer gas tank.
+    event GasTankWithdrawal(address indexed client, address indexed to, uint256 amount);
 
 //-----------------------------------------------------------------------// v INTERFACES
 
@@ -66,15 +66,11 @@ contract Service{
     uint8 private subscriptionTokenDecimals = 6;        // Cached decimals for subscription payment token.
     uint32 constant private freeTrialDays = 30;         // Free subscription days granted only on first registration.
 
-    uint256 private polFee = 0.125 ether;           // Native POL fee paid by players to support signer gas.
-    uint256 private signerFundAmount = 1 ether;         // POL sent to a new signer wallet during registration.
-    uint256 private signerBalanceTarget = 4 ether;      // Current target POL balance for each client signer.
-    uint256 private clientGasBalanceLimit = 8 ether;    // Current POL limit stored in one client's gas balance.
+    uint256 private signerBalanceTarget = 2 ether;      // Current target POL balance for each client signer.
+    uint256 private clientGasTankLimit = 10 ether;      // Current POL limit stored in one client's gas tank.
 
-    uint256 constant private maxPolFee = 5 ether;               // Maximum allowed POL topup fee.
-    uint256 constant private maxSignerFundAmount = 10 ether;        // Maximum allowed initial signer funding.
     uint256 constant private maxSignerBalanceTarget = 10 ether;     // Maximum allowed signer balance target.
-    uint256 constant private maxClientGasBalanceLimit = 20 ether;   // Maximum allowed per-client gas balance limit.
+    uint256 constant private maxClientGasTankLimit = 50 ether;      // Maximum allowed per-client gas tank limit.
 
 //-----------------------------------------------------------------------// v STRINGS
 
@@ -87,7 +83,7 @@ contract Service{
 
         bytes32 key;                            // Service login key derived from client wallet and signup hash.
         address signer;                         // Hot wallet allowed to submit this client's player withdrawals.
-        uint256 gasBalance;                     // Client-owned POL reserved for signer funding.
+        uint256 gasTank;                        // Client-owned POL reserved for signer funding.
         uint64 subscriptionExpiresAt;           // Unix timestamp until which player topups are enabled for this client.
         mapping(address => uint32) balance;     // Client-owned token balances held by this contract, keyed by token address.
     }
@@ -250,52 +246,8 @@ contract Service{
         return _price * (10 ** subscriptionTokenDecimals);
     }
 
-    // Uses topup POL to fund the signer first, then client gas balance, then returns excess to the player.
-    function _handleTopupGas(Client storage _client, address _signer, address _payer, uint256 _amount) private{
-
-        if(_amount == 0)
-            return;
-
-        uint256 remaining = _amount;
-        uint256 signerBalance = _signer.balance;
-        uint256 target = signerBalanceTarget;
-
-        if(signerBalance < target){
-
-            uint256 signerFund = target - signerBalance;
-
-            if(signerFund > remaining)
-                signerFund = remaining;
-
-            unchecked{ remaining -= signerFund; }
-            _sendPol(_signer, signerFund);
-        }
-
-        if(remaining == 0)
-            return;
-
-        uint256 gasBalance = _client.gasBalance;
-        uint256 limit = clientGasBalanceLimit;
-
-        if(gasBalance < limit){
-
-            uint256 credit = limit - gasBalance;
-
-            if(credit > remaining)
-                credit = remaining;
-
-            unchecked{
-                _client.gasBalance = gasBalance + credit;
-                remaining -= credit;
-            }
-        }
-
-        if(remaining > 0)
-            _sendPol(_payer, remaining);
-    }
-
-    // Funds a signer from its client's stored gas balance until the signer reaches the configured cap.
-    function _fundSignerFromClientGas(address _client, address _signer) private{
+    // Funds a signer from its client's stored gas tank until the signer reaches the configured target.
+    function _fundSignerFromGasTank(Client storage _client, address _signer) private{
 
         uint256 signerBalance = _signer.balance;
         uint256 target = signerBalanceTarget;
@@ -303,8 +255,7 @@ contract Service{
         if(signerBalance >= target)
             return;
 
-        Client storage client = clients[_client];
-        uint256 amount = client.gasBalance;
+        uint256 amount = _client.gasTank;
 
         if(amount == 0)
             return;
@@ -314,9 +265,24 @@ contract Service{
         if(amount > signerNeed)
             amount = signerNeed;
 
-        client.gasBalance -= amount;
+        _client.gasTank -= amount;
 
         _sendPol(_signer, amount);
+    }
+
+    // Calculates the POL needed to bring one signer wallet up to the configured target.
+    function _signerFundingAmount(address _signer) private view returns(uint256){
+
+        uint256 target = signerBalanceTarget;
+        uint256 signerBalance = _signer.balance;
+
+        return signerBalance < target ? target - signerBalance : 0;
+    }
+
+    // Calculates the first-registration POL amount needed to fill the signer up to target plus the client gas tank.
+    function _registrationAmount(address _signer) private view returns(uint256){
+
+        return _signerFundingAmount(_signer) + clientGasTankLimit;
     }
 
 //-----------------------------------------------------------------------// v GET FUNCTIONS
@@ -374,40 +340,16 @@ contract Service{
         return tokenInfo[_token].decimals;
     }
 
-    // Returns the POL topup fee players must pay.
-    function GetPolFee() public view returns(uint256){
+    // Returns the current POL limit each client can keep in its gas tank.
+    function GetClientGasTankLimit() public view returns(uint256){
 
-        return polFee;
+        return clientGasTankLimit;
     }
 
-    // Returns the maximum allowed polFee.
-    function GetMaxPolFee() public pure returns(uint256){
+    // Returns the maximum allowed clientGasTankLimit.
+    function GetMaxClientGasTankLimit() public pure returns(uint256){
 
-        return maxPolFee;
-    }
-
-    // Returns the current POL limit each client can keep in its gas balance.
-    function GetClientGasBalanceLimit() public view returns(uint256){
-
-        return clientGasBalanceLimit;
-    }
-
-    // Returns the maximum allowed clientGasBalanceLimit.
-    function GetMaxClientGasBalanceLimit() public pure returns(uint256){
-
-        return maxClientGasBalanceLimit;
-    }
-
-    // Returns the POL amount sent to a new signer during registration.
-    function GetSignerFundAmount() public view returns(uint256){
-
-        return signerFundAmount;
-    }
-
-    // Returns the maximum allowed signerFundAmount.
-    function GetMaxSignerFundAmount() public pure returns(uint256){
-
-        return maxSignerFundAmount;
+        return maxClientGasTankLimit;
     }
 
     // Returns the signer POL balance target.
@@ -422,10 +364,36 @@ contract Service{
         return maxSignerBalanceTarget;
     }
 
-    // Returns POL owned by a client for future signer funding or manual withdrawal.
-    function GetClientGasBalance(address _client) public view returns(uint256){
+    // Returns the POL required only for first registration: missing signer POL plus full client gas tank.
+    function GetRegistrationAmount(address _signer) public view returns(uint256){
 
-        return clients[_client].gasBalance;
+        return _registrationAmount(_signer);
+    }
+
+    // Returns the POL required when an existing client changes to this signer.
+    function GetSignerFundingAmount(address _signer) public view returns(uint256){
+
+        return _signerFundingAmount(_signer);
+    }
+
+    // Returns POL owned by a client for future signer funding or manual withdrawal.
+    function GetClientGasTank(address _client) public view returns(uint256){
+
+        return clients[_client].gasTank;
+    }
+
+    // Returns the client gas tank fill level from 0 to 10000 for UI display.
+    function GetClientGasTankLevel(address _client) public view returns(uint16){
+
+        uint256 gasTank = clients[_client].gasTank;
+        uint256 limit = clientGasTankLimit;
+
+        if(gasTank == 0)
+            return 0;
+        if(gasTank >= limit)
+            return 10000;
+
+        return uint16(gasTank * 10000 / limit);
     }
 
     // Returns the ERC20 token accepted for subscription payments.
@@ -600,28 +568,6 @@ contract Service{
         return true;
     }
 
-    // Sets the native POL fee required on player topups.
-    function SetPolFee(uint256 _amount) public ownerOnly returns(bool){
-
-        if(_amount > maxPolFee)
-            revert InvalidAmount();
-
-        polFee = _amount;
-
-        return true;
-    }
-
-    // Sets how much POL a new signer receives on registration or signer change.
-    function SetSignerFundAmount(uint256 _amount) public ownerOnly returns(bool){
-
-        if(_amount > maxSignerFundAmount)
-            revert InvalidAmount();
-
-        signerFundAmount = _amount;
-
-        return true;
-    }
-
     // Sets the signer POL balance target.
     function SetSignerBalanceTarget(uint256 _amount) public ownerOnly returns(bool){
 
@@ -634,12 +580,12 @@ contract Service{
     }
 
     // Sets the maximum POL amount each client can store for signer funding.
-    function SetClientGasBalanceLimit(uint256 _amount) public ownerOnly returns(bool){
+    function SetClientGasTankLimit(uint256 _amount) public ownerOnly returns(bool){
 
-        if(_amount > maxClientGasBalanceLimit)
+        if(_amount == 0 || _amount > maxClientGasTankLimit)
             revert InvalidAmount();
 
-        clientGasBalanceLimit = _amount;
+        clientGasTankLimit = _amount;
 
         return true;
     }
@@ -729,6 +675,7 @@ contract Service{
     }
 
     // Registers or updates the caller's service key and signer wallet without clearing balances.
+    // First registration must fully fund the signer balance target and the client's gas tank.
     function RegisterClient(bytes calldata _hash, address _signer) public payable nonReentrant returns(bool){
 
         if(_signer == address(0))
@@ -736,21 +683,24 @@ contract Service{
         if(_signer.code.length != 0)
             revert InvalidSigner();
 
-        address currentSigner = clients[msg.sender].signer;
-        uint256 requiredFund = currentSigner == _signer ? 0 : signerFundAmount;
-
-        if(msg.value != requiredFund)
-            revert InvalidFee();
-
         Client storage client = clients[msg.sender];
+        address currentSigner = client.signer;
+        bool firstRegistration = currentSigner == address(0);
+        bool signerChanged = currentSigner != _signer;
+        uint256 requiredAmount = firstRegistration ? _registrationAmount(_signer) : signerChanged ? _signerFundingAmount(_signer) : 0;
+
+        if(msg.value != requiredAmount)
+            revert InvalidFee();
 
         client.key = sha256(abi.encodePacked(msg.sender, _hash));
         client.signer = _signer;
 
-        if(client.subscriptionExpiresAt == 0)
+        if(firstRegistration){
+            client.gasTank = clientGasTankLimit;
             client.subscriptionExpiresAt = uint64(block.timestamp + uint256(freeTrialDays) * 1 days);
+        }
 
-        _sendPol(_signer, requiredFund);
+        _sendPol(_signer, requiredAmount - (firstRegistration ? clientGasTankLimit : 0));
 
         emit Registered(msg.sender, _signer);
 
@@ -758,15 +708,13 @@ contract Service{
     }
 
     // Lets a player deposit tokens to a server owner's balance.
-    function Topup(address _to, string calldata _symbol, uint32 _amount, uint8 _server, string calldata _character) public payable nonReentrant returns(bool){
+    function Topup(address _to, string calldata _symbol, uint32 _amount, uint8 _server, string calldata _character) public nonReentrant returns(bool){
 
         address tokenAddress_ = tokenAddress[_symbol];
         Token memory token = tokenInfo[tokenAddress_];
 
         if(_amount == 0)
             revert InvalidAmount();
-        if(msg.value != polFee)
-            revert InvalidFee();
         if(!token.added || !token.topupEnabled)
             revert UnsupportedToken();
         Client storage client = clients[_to];
@@ -778,7 +726,6 @@ contract Service{
             revert SubscriptionExpired();
 
         _depositBalance(tokenAddress_, token.decimals, _to, _amount);
-        _handleTopupGas(client, signer, msg.sender, msg.value);
 
         emit Deposit(msg.sender, _to, _symbol, _amount, _server, _character);
 
@@ -788,7 +735,8 @@ contract Service{
     // Lets the registered signer submit a player withdrawal from the client balance.
     function Withdraw(address _from, address _to, string calldata _symbol, uint32 _amount, uint8 _server, string calldata _character, uint32 _refund) public nonReentrant returns(bool){
 
-        address signer = clients[_from].signer;
+        Client storage client = clients[_from];
+        address signer = client.signer;
 
         if(_amount == 0)
             revert InvalidAmount();
@@ -802,7 +750,7 @@ contract Service{
             revert Expired();
 
         _withdrawBalance(tokenAddress[_symbol], _from, _amount, _to);
-        _fundSignerFromClientGas(_from, signer);
+        _fundSignerFromGasTank(client, signer);
 
         emit Withdrawal(_from, _to, _symbol, _amount, _server, _character, _refund);
 
@@ -822,8 +770,43 @@ contract Service{
         return true;
     }
 
-    // Lets clients withdraw POL from their own gas balance.
-    function WithdrawGasBalance(address _to, uint256 _amount) public nonReentrant returns(bool){
+    // Lets registered clients add POL to their own signer gas tank.
+    function DepositGasTank() public payable nonReentrant returns(bool){
+
+        if(msg.value == 0)
+            revert InvalidAmount();
+        Client storage client = clients[msg.sender];
+
+        if(client.signer == address(0))
+            revert ClientNotRegistered();
+
+        uint256 gasTank = client.gasTank;
+        uint256 limit = clientGasTankLimit;
+
+        if(gasTank >= limit || msg.value > limit - gasTank)
+            revert InvalidAmount();
+
+        unchecked{ client.gasTank = gasTank + msg.value; }
+
+        return true;
+    }
+
+    // Lets registered clients refill their signer from their own gas tank.
+    function FundSignerFromGasTank() public nonReentrant returns(bool){
+
+        Client storage client = clients[msg.sender];
+        address signer = client.signer;
+
+        if(signer == address(0))
+            revert ClientNotRegistered();
+
+        _fundSignerFromGasTank(client, signer);
+
+        return true;
+    }
+
+    // Lets clients withdraw POL from their own gas tank.
+    function WithdrawGasTank(address _to, uint256 _amount) public nonReentrant returns(bool){
 
         if(_to == address(0))
             revert ZeroAddress();
@@ -831,21 +814,21 @@ contract Service{
             revert InvalidAmount();
         Client storage client = clients[msg.sender];
 
-        if(client.gasBalance < _amount)
+        if(client.gasTank < _amount)
             revert InsufficientBalance();
 
-        client.gasBalance -= _amount;
+        client.gasTank -= _amount;
 
         _sendPol(_to, _amount);
 
-        emit GasBalanceWithdrawal(msg.sender, _to, _amount);
+        emit GasTankWithdrawal(msg.sender, _to, _amount);
 
         return true;
     }
 
 //-----------------------------------------------------------------------// v DEFAULTS
 
-    // Blocks direct POL sends because all accepted POL must belong to registration, topup, or gas withdrawal flows.
+    // Blocks direct POL sends because accepted POL must use registration or gas tank functions.
     receive() external payable {
 
         revert InvalidAmount();
