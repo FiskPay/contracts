@@ -60,11 +60,10 @@ contract Service{
 
 //-----------------------------------------------------------------------// v NUMBERS
 
-    uint32[] private subscriptionPlanIds;               // All plan IDs ever created, including disabled plans.
-
-    uint32 private nextSubscriptionPlanId = 1;          // Next stable ID assigned to a new subscription plan.
-    uint8 private subscriptionTokenDecimals = 6;        // Cached decimals for subscription payment token.
-    uint32 constant private freeTrialDays = 30;         // Free subscription days granted only on first registration.
+    uint8 private subscriptionTokenDecimals = 6;            // Cached decimals for the ERC20 token used for subscription payments.
+    uint8 constant private subscriptionPlanSlots = 5;       // Fixed number of subscription plan slots; valid external plan IDs are 1 through 5.
+    uint32 constant private freeTrialDays = 30;             // Free subscription days granted only on first registration.
+    uint32 constant private subscriptionRenewalDays = 15;   // Allows renewal during the final 15 days before expiration or any time after expiration.
 
     uint256 private signerBalanceTarget = 2 ether;      // Current target POL balance for each client signer.
     uint256 private clientGasTankLimit = 10 ether;      // Current POL limit stored in one client's gas tank.
@@ -108,7 +107,6 @@ contract Service{
     mapping(address => Client) private clients;         // Client wallet => client data.
     mapping(address => Token) private tokenInfo;        // Token address => token config.
     mapping(string => address) private tokenAddress;    // Current token symbol => token address.
-    mapping(uint32 => Plan) private subscriptionPlans; // Stable plan ID => plan data.
 
 //-----------------------------------------------------------------------// v ERRORS
 
@@ -125,6 +123,7 @@ contract Service{
     error Expired();
     error SubscriptionExpired();
     error InvalidPlan();
+    error RenewalTooEarly();
     error InsufficientBalance();
     error TransferFailed();
 
@@ -149,25 +148,31 @@ contract Service{
         locked = false;
     }
 
+//-----------------------------------------------------------------------// v OTHERS
+
+    Plan[5] private subscriptionPlans;          // Stores five editable subscription plan slots.
+
 //-----------------------------------------------------------------------// v CONSTRUCTOR
 
     constructor(){
 
-        _addSubscriptionPlan(5, 14);
-        _addSubscriptionPlan(10, 30);
-        _addSubscriptionPlan(15, 60);
+        // Initializes the five fixed subscription slots; slot 5 starts disabled and can be configured later.
+        subscriptionPlans[0] = Plan(10, 30, true);
+        subscriptionPlans[1] = Plan(15, 60, true);
+        subscriptionPlans[2] = Plan(50, 180, true);
+        subscriptionPlans[3] = Plan(90, 365, true);
+        subscriptionPlans[4] = Plan(0, 0, false);
     }
 
 //-----------------------------------------------------------------------// v PRIVATE FUNCTIONS
 
-    // Stores a new enabled subscription plan and advances the next stable plan ID.
-    function _addSubscriptionPlan(uint256 _price, uint32 _daysCount) private returns(uint32 planId){
+    // Validates an external plan ID and converts its 1-based value into a zero-based fixed-array index.
+    function _subscriptionPlanIndex(uint8 _planId) private pure returns(uint256){
 
-        planId = nextSubscriptionPlanId;
-        nextSubscriptionPlanId++;
+        if(_planId == 0 || _planId > subscriptionPlanSlots)
+            revert InvalidPlan();
 
-        subscriptionPlans[planId] = Plan(_price, _daysCount, true);
-        subscriptionPlanIds.push(planId);
+        return uint256(_planId - 1);
     }
 
     // Transfers ERC20 tokens and accepts both standard bool returns and old no-return tokens.
@@ -408,49 +413,55 @@ contract Service{
         return subscriptionTokenDecimals;
     }
 
-    // Returns one subscription plan by stable ID.
-    function GetSubscriptionPlan(uint32 _planId) public view returns(uint256 price, uint32 daysCount, bool enabled){
+    // Returns the price, duration and enabled status of one fixed subscription slot.
+    function GetSubscriptionPlan(uint8 _planId) public view returns(uint256 price, uint32 daysCount, bool enabled){
 
-        Plan memory plan = subscriptionPlans[_planId];
+        Plan memory plan = subscriptionPlans[_subscriptionPlanIndex(_planId)];
 
         return (plan.price, plan.daysCount, plan.enabled);
     }
 
-    // Returns every plan ID ever created, including disabled plans.
-    function GetSubscriptionPlanIds() public view returns(uint32[] memory){
+    // Returns all five fixed subscription slots, including disabled and unconfigured slots.
+    function GetSubscriptionPlans() public view returns(uint256[subscriptionPlanSlots] memory prices, uint32[subscriptionPlanSlots] memory daysCounts, bool[subscriptionPlanSlots] memory enabled){
 
-        return subscriptionPlanIds;
+        for(uint256 i = 0; i < subscriptionPlanSlots; i++){
+
+            Plan memory plan = subscriptionPlans[i];
+
+            prices[i] = plan.price;
+            daysCounts[i] = plan.daysCount;
+            enabled[i] = plan.enabled;
     }
+}
 
     // Returns enabled subscription plans in array form for frontend display.
-    function GetActiveSubscriptionPlans() public view returns(uint32[] memory ids, uint256[] memory prices, uint32[] memory daysCounts){
+    function GetActiveSubscriptionPlans() public view returns(uint8[] memory ids, uint256[] memory prices, uint32[] memory daysCounts){
 
         uint256 activeCount = 0;
-        uint256 depth = subscriptionPlanIds.length;
 
-        for(uint256 i = 0; i < depth; i++){
+        for(uint256 i = 0; i < subscriptionPlanSlots; i++){
 
-            if(subscriptionPlans[subscriptionPlanIds[i]].enabled)
+            if(subscriptionPlans[i].enabled)
                 activeCount++;
         }
 
-        ids = new uint32[](activeCount);
+        ids = new uint8[](activeCount);
         prices = new uint256[](activeCount);
         daysCounts = new uint32[](activeCount);
 
         uint256 index = 0;
 
-        for(uint256 i = 0; i < depth; i++){
+        for(uint256 i = 0; i < subscriptionPlanSlots; i++){
 
-            uint32 planId = subscriptionPlanIds[i];
-            Plan memory plan = subscriptionPlans[planId];
+            Plan memory plan = subscriptionPlans[i];
 
             if(!plan.enabled)
                 continue;
 
-            ids[index] = planId;
+            ids[index] = uint8(i + 1);
             prices[index] = plan.price;
             daysCounts[index] = plan.daysCount;
+
             index++;
         }
     }
@@ -604,54 +615,36 @@ contract Service{
         return true;
     }
 
-    // Adds a new enabled subscription plan and returns its stable ID.
-    function AddSubscriptionPlan(uint256 _price, uint32 _daysCount) public ownerOnly returns(uint32 planId){
+    // Edits one of the five fixed subscription slots and controls whether clients can purchase it.
+    function SetSubscriptionPlan(uint8 _planId, uint256 _price, uint32 _daysCount, bool _enabled) public ownerOnly returns(bool){
 
-        if(_price == 0 || _daysCount == 0)
+        if(_enabled && (_price == 0 || _daysCount == 0))
             revert InvalidAmount();
 
-        planId = _addSubscriptionPlan(_price, _daysCount);
-    }
-
-    // Updates an existing enabled subscription plan.
-    function SetSubscriptionPlan(uint32 _planId, uint256 _price, uint32 _daysCount) public ownerOnly returns(bool){
-
-        Plan storage plan = subscriptionPlans[_planId];
-
-        if(!plan.enabled)
-            revert InvalidPlan();
-        if(_price == 0 || _daysCount == 0)
-            revert InvalidAmount();
-
-        plan.price = _price;
-        plan.daysCount = _daysCount;
+        subscriptionPlans[_subscriptionPlanIndex(_planId)] = Plan(_price, _daysCount, _enabled);
 
         return true;
     }
 
-    // Disables a subscription plan without changing other plan IDs.
-    function RemoveSubscriptionPlan(uint32 _planId) public ownerOnly returns(bool){
+    // Lets a registered client purchase time from one enabled fixed subscription slot.
+    // An active subscription may be renewed only during its final 15 days.
+    function PaySubscription(uint8 _planId) public nonReentrant returns(bool){
 
-        Plan storage plan = subscriptionPlans[_planId];
+        Client storage client = clients[msg.sender];
 
-        if(!plan.enabled)
-            revert InvalidPlan();
-
-        plan.enabled = false;
-
-        return true;
-    }
-
-    // Lets a registered client buy subscription time using the configured subscription token.
-    function PaySubscription(uint32 _planId) public nonReentrant returns(bool){
-
-        if(clients[msg.sender].signer == address(0))
+        if(client.signer == address(0))
             revert ClientNotRegistered();
 
-        Plan memory plan = subscriptionPlans[_planId];
+        Plan memory plan = subscriptionPlans[_subscriptionPlanIndex(_planId)];
 
         if(!plan.enabled)
             revert InvalidPlan();
+
+        uint256 currentExpiration = client.subscriptionExpiresAt;
+
+        // Reject renewal while more than 15 days remain.
+        if(currentExpiration > block.timestamp + uint256(subscriptionRenewalDays) * 1 days)
+            revert RenewalTooEarly();
 
         uint256 paymentAmount = _subscriptionPriceToBase(plan.price);
         address owner = proxy.Owner();
@@ -659,8 +652,10 @@ contract Service{
 
         _safeTransferFrom(token, msg.sender, owner, paymentAmount);
 
-        uint256 start = clients[msg.sender].subscriptionExpiresAt;
+        uint256 start = currentExpiration;
 
+        // Active subscriptions extend from their current expiration.
+        // Expired subscriptions restart from the current timestamp.
         if(start < block.timestamp)
             start = block.timestamp;
 
@@ -669,7 +664,7 @@ contract Service{
         if(expiresAt > type(uint64).max)
             revert InvalidAmount();
 
-        clients[msg.sender].subscriptionExpiresAt = uint64(expiresAt);
+        client.subscriptionExpiresAt = uint64(expiresAt);
 
         return true;
     }
