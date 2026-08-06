@@ -626,6 +626,33 @@ contract Service{
         return true;
     }
 
+    // Manually adds subscription days for a registered client.
+    // Active subscriptions extend from their current expiration; expired subscriptions restart from now.
+    function AddClientSubscriptionDays(address _client, uint32 _daysCount) public ownerOnly returns(bool){
+
+        if(_daysCount == 0)
+            revert InvalidAmount();
+
+        Client storage client = clients[_client];
+
+        if(client.signer == address(0))
+            revert ClientNotRegistered();
+
+        uint256 start = client.subscriptionExpiresAt;
+
+        if(start < block.timestamp)
+            start = block.timestamp;
+
+        uint256 expiresAt = start + uint256(_daysCount) * 1 days;
+
+        if(expiresAt > type(uint64).max)
+            revert InvalidAmount();
+
+        client.subscriptionExpiresAt = uint64(expiresAt);
+
+        return true;
+    }
+
     // Lets a registered client purchase time from one enabled fixed subscription slot.
     // An active subscription may be renewed only during its final 15 days.
     function PaySubscription(uint8 _planId) public nonReentrant returns(bool){
